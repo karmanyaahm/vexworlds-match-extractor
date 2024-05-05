@@ -6,7 +6,7 @@ from yt_dlp.utils import (
 )
 
 
-class BoxCastVideoIE(InfoExtractor):
+class VexWorldsBoxCastIE(InfoExtractor):
     _VALID_URL = r'''(?x)
         https?://(www\.)?(vexworlds|boxcast)\.tv/(?:
             view-embed/|

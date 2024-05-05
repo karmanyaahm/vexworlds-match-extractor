@@ -5,6 +5,7 @@ from typing import Tuple
 import argparse
 import re
 from os import system
+from os.path import isfile, getsize
 
 # need to install deps
 import pytesseract
@@ -22,6 +23,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Extract vids ig")
     parser.add_argument(
         "-i", "--input", dest="input_file", type=str, help="Path/vexworlds.tv URL to the input file",
+        action='append',
         required = True,
     )
     parser.add_argument(
@@ -44,18 +46,26 @@ DEBUG = args.debug
 print(args.matches)
 
 
-if args.input_file.startswith("http"):
+if True:
     success = 0
+    lastmsg = 0
     class MyLogger:
         def __getattr__(self, name): 
             def f(msg):    # pretend this function is every function like debug, info, warning, error
-                print("YoutubeDL:", msg)
+                global lastmsg
+                if "ETA" in msg: 
+                    print("YoutubeDL:", msg, " " * (lastmsg - len(msg)), end = "\r")
+                else: print("YoutubeDL:", msg)
+                lastmsg = len(msg)
+            
             return f
 
     def capture_filename(status):
         global args, success
         success+=1
-        args.input_file = status['filename']
+        el = args.input_file.index(status['info_dict']['webpage_url']) 
+        args.input_file[el] = status['filename']
+        print(args.input_file)
 
     ydl_opts = {
         'logger': MyLogger(),
@@ -63,28 +73,52 @@ if args.input_file.startswith("http"):
     }
 
     with YoutubeDL(ydl_opts) as ydl:
-        ydl.download(["https://www.vexworlds.tv/#/viewer/broadcasts/qualification-matches-innovate-elk09hemvm4c9ewwwevn/o0pngqswkl9vdmx59rwp"])
+        ydl.download([i for i in args.input_file if i.startswith("http")])
     
     if not success:
         print("youtubedl didn't return a filename???")
         exit(0)
     
-    
-
-
 if not args.output_file:
-    args.output_file = args.input_file
-
+    args.output_file = ''.join(args.input_file)
 
 print(f'READING from "{args.input_file}"')
 print(f'WRITING to "Match N - {args.output_file}"')
+
+class CV2Reader:
+    contents = []
+    total = 0
+    def __init__(self, names):
+        for name in names:
+            cap = cv2.VideoCapture(name)
+            self.contents.append((name, cap, cap.get(cv2.CAP_PROP_FRAME_COUNT)) )
+            self.total += cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        print(self.contents)
+
+    def read(self, num):
+        for name, cap, availableinthisone in self.contents:
+            if num < availableinthisone:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, num)
+                _, frame = cap.read()
+                #print("ret", name, frame, num, availableinthisone)
+                return name, frame, num
+            else:
+                num -= availableinthisone
+        raise Exception("non existtant frame " + str(num))
+        
+    def close(self):
+        for _, cap, _ in self.contents:
+            cap.release()
+
+            
+
 
 # not needed on nixos at least
 # Set the path to the Tesseract executable
 # pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/env tesseract'
 
 # Read the video file
-video_capture = cv2.VideoCapture(args.input_file)
+video_capture = CV2Reader(args.input_file)
 
 ROIS = [(0, 0, 484 / 1920, 99 / 1080), [13 / 1920, 84 / 1080, 875 / 1920, 125 / 1080]]
 REGEXES = [re.compile("QUAL ?(\d+)"), re.compile("QUALIFICATION (\d+)")]
@@ -96,8 +130,6 @@ print("Regions: ", ROIS)
 
 frame_count = 0
 last_frame_count = 0  # dV for prog bar only???
-
-total_frames_in = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
 
 lastgroup = []
 
@@ -135,35 +167,34 @@ def get_num_from_frame(frame, which) -> int:
 
 
 def fetch_num_and_frame(frame_num, which):
-    video_capture.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
     # Read the frame
-    ret, frame = video_capture.read()
+    _, frame, _ = video_capture.read(frame_num)
     num = get_num_from_frame(frame, which)
     return num
 
 
 def search_for_match(m, which, lower_bound = 0):
-    upper_bound = total_frames_in - 1
-    while lower_bound <= upper_bound:
+    upper_bound = video_capture.total - 1
+    while upper_bound - lower_bound >= 20 * FPS: # cutoff
         mid_frame = int((lower_bound + upper_bound) // 2)
+        original_mid_frame = mid_frame
         if mid_frame == lower_bound:
             print("STUPID CANNOT ADVANCE ANYMORE")
             return None
         if DEBUG: print(lower_bound, mid_frame, upper_bound)
 
         num = None
-        while True:
+        for n in range(200):
             if DEBUG: print("HI", mid_frame)
-            video_capture.set(cv2.CAP_PROP_POS_FRAMES, mid_frame)
             # Read the frame
-            ret, frame = video_capture.read()
+            _, frame, _ = video_capture.read(mid_frame)
             num = get_num_from_frame(frame, which)
             if not num:
-                mid_frame += int(SKIP)
+                mid_frame = original_mid_frame + 10*SKIP * (n//2 + 1 if n%2 else -n//2)
             else:
                 break
 
-        print("FOUND match", num,"at frame", mid_frame, "/", total_frames_in)
+        print("FOUND match", num,"at frame", mid_frame, "/", video_capture.total)
 
         # print(num, type(num), m, type(m))
         if num < m:
@@ -198,12 +229,20 @@ for m in args.matches:
     print("match: ", tupmatch)
 
     print("Searching for score")
-    frame_num = search_for_match(m, 1)
+    frame_num = search_for_match(m, 1, lower_bound=tupmatch[0])
     tupscore = lin_search_boundaries(frame_num, 1, 3)
     print(tupscore)
+    matchst = video_capture.read(tupmatch[0])[2] / FPS
+    matchend = video_capture.read(tupmatch[1])[2] / FPS
+    matchinpname = video_capture.read(tupmatch[0])[0]
+
+    scorest = video_capture.read(tupscore[0])[2] / FPS
+    scoreend = video_capture.read(tupscore[1])[2] / FPS
+    scoreinpname = video_capture.read(tupscore[0])[0]
+
     cmds = [
-        f"ffmpeg -ss {tupmatch[0] / FPS} -to {tupmatch[1] / FPS} -i '{args.input_file}' -c copy 'tmpsegment1.mp4'",
-        f"ffmpeg -ss {tupscore[0] / FPS} -to {tupscore[1] / FPS} -i '{args.input_file}' -c copy 'tmpsegment2.mp4'",
+        f"ffmpeg -ss {matchst} -to {matchend} -i '{matchinpname}' -c copy 'tmpsegment1.mp4'",
+        f"ffmpeg -ss {scorest} -to {scoreend} -i '{scoreinpname}' -c copy 'tmpsegment2.mp4'",
         f"echo \"file './tmpsegment1.mp4'\" > ./tmplist.txt",
         f"echo \"file './tmpsegment2.mp4'\" >> ./tmplist.txt",
         f"ffmpeg -f concat -safe 0 -i ./tmplist.txt -c copy 'Match {m} - {args.output_file}'",
@@ -212,3 +251,5 @@ for m in args.matches:
     for i in cmds: print(i)
     if input("RUN [Y/N]: ").lower() == "y": 
         for i in cmds: system(i)
+
+video_capture.close()
