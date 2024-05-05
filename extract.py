@@ -66,6 +66,7 @@ if True:
         el = args.input_file.index(status['info_dict']['webpage_url']) 
         args.input_file[el] = status['filename']
         print(args.input_file)
+        args.output_file = status['info_dict']['title'] + " "  + status['info_dict']['description'] + ".mp4"
 
     ydl_opts = {
         'logger': MyLogger(),
